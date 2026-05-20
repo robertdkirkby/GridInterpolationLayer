@@ -23,6 +23,7 @@
 %\usepackage{amsthm}
 %\usepackage{setspace}
 \usepackage{multirow}
+\usepackage{subcaption}
 \newcommand{\tb}{\hspace*{3mm}}
 \bibpunct{(}{)}{;}{a}{,}{,}
 \parskip=3mm 
@@ -109,6 +110,31 @@ For interpolation to work on the GPU, we need to use a more parallel/less serial
 
 So to implement this, we solve the 'first layer' considering only values of $aprime$ on the grid. Then in the second layer we consider only values of $aprime$ that are on the second layer grid, which puts $n2$ points between the first layer grid points above and below the first layer grid point that was found to be optimal in the first layer. Note that the effect of all of this is that we are implicitly considering the 'fine' grid on aprime that is given by the Matlab code $aprime\_{}grid=interp1(1:1:n,a\_{}grid,linspace(1,n,n+n2*(n-1)))$, which contains $n2*(n-1)+n$ points (the $n$ points on the first layer grid, plus $n2$ points between each of them). But by doing it in two layers we only actually end up considering $n+(3+2*n2)$ points, and so runtimes are fine. As an example, we might use 301 points in the first layer and 20 in the second, meaning we are implicitly considering a grid of 6301 points on next period assets, but only have to actually evaluate 344 points in two layers. Most important for the GPU, there are just two steps in serial, and everything else is done in parallel within these two layers.
 
+\newpage
+
+\subsection*{Intuition}
+Imagine we are at a particular point in today's state-space, and we are deciding which value (or index) of $aprime$ to choose. Say the first layer grid on $aprime$ has seven points, represented in Figure \ref{fig:firstlayer} as seven numbered circles. Each circle has an associated value of the return function $F$ and of the next period expected value function $EV$. Say it turns out that the third circle is the optimal choice on the first layer grid (the first layer of the grid interpolation layer algorithm). We are then in the situation of Figure \ref{fig:secondlayer}: we keep the third circle together with the first layer circles immediately above and below it, and between each consecutive pair we insert five smaller circles, which form the second layer (the grid interpolation layer itself). In Figure \ref{fig:secondlayer} the second layer optimum is at $2.4$, where the integer part is the lower first layer grid point and the decimal counts the small circles between it and the next first layer grid point upwards, so the chosen point is two small circles below the third coarse circle that was optimal in the first stage.
+
+\begin{figure}[h]
+\caption{Grid Interpolation Layer - Intuition}
+\centering
+\begin{subfigure}[c]{0.45\textwidth}
+\centering
+\includegraphics{Graphs/FigureX.pdf}
+\caption{First layer: the seven points of the coarse grid on $aprime$. The third circle (blue) is the first layer optimum.}
+\label{fig:firstlayer}
+\end{subfigure}
+\hfill
+\begin{subfigure}[c]{0.45\textwidth}
+\centering
+\includegraphics{Graphs/FigureY.pdf}
+\caption{Second layer: the first layer optimum (circle $3$, blue) and its two neighbours, with five second layer points (orange) between each consecutive pair of first layer points. The second layer optimum at $2.4$ is shown in dark blue.}
+\label{fig:secondlayer}
+\end{subfigure}
+\end{figure}
+
+\newpage
+
 \subsection{Pseudocode}
 This is the pseudocode for solving a simple finite horizon value function problem. One endogenous state, no decision variable, one markov shock. Let $a_grid=\{a_1,\dots,a_n\}$ be the grid on assets (for both today and tomorrow), and  $z\_{}grid=\{z_1,\dots,z_m\}$ be the grid on the markov shock and let $pi\_{}z$ be the associated markov transition matrix.
 
@@ -169,6 +195,64 @@ When using the grid interpolation layer ($vfoptions.gridinterplayer=1$) the $Pol
 
 For evaluating functions on the agent distribution we just need to convert $Policy$ to $PolicyVals$ (from indexes to values) and then the rest of the commands are standard. When using the policy to evaluate fns on the agent dist we want the aprime value, which we can trivially do by creating the 'fine' grid, $aprime\_{}grid=interp1(1:1:n,a\_{}grid,linspace(1,n,n+n2*(n-1)))$ and getting the index for the fine grid as 'fine grid index'=$n*($'index of the lower grid point of $a\_{}grid$'$ -1)+$'second layer index', then simply use the index for the fine grid to get the grid value from the fine grid
 
+
+\subsection*{How to deal with -Inf?}
+To get the basic idea of what can go wrong when we have $-\infty$, imagine the following. We have a model in which 'assets' is an endogenous state. The coarse (first layer) grid has eleven points, $a\_{}grid=[0,10,20,\dots,90,100]$. Say the model has a constraint that you are not allowed to choose assets above $97$, so the return function gives $-\infty$ whenever $aprime>97$. The problem is that, say, you choose $aprime=97$; then when we interpolate this back onto $a\_{}grid$ during simulation/iteration of the agent distribution, some mass ends up at $a=100$. Despite the fact that no agent is allowed to choose $aprime>97$, and no agent does, some agents still end up with $a=100$. This is what we want to eliminate by being careful in how the grid interpolation layer handles $-\infty$.
+
+To understand how to handle $-\infty$ we need to consider two possibilities: that the $-\infty$ comes from the next period value function, or that the $-\infty$ comes from the return function. To be able to consider these, we revisit Figure \ref{fig:secondlayer}. In Figure \ref{fig:splitcells} we have replaced each circle by a pair of circles joined by a $+$ sign: the left circle holds the return function value ($R_2, R_{2.1},\dots$) and the right circle holds the next period (expected) value function value ($V_2, V_{2.1},\dots$). The optimal choice is the row that gives the largest $R+\beta V$. The key difference between the two cases is that we only know $V$ on the coarse grid and have to interpolate $V$ at the second layer points, whereas $R$ can be calculated exactly at the second layer points (because we know the return function).
+
+\begin{figure}[h]
+\centering
+\includegraphics{Graphs/FigureZ.pdf}
+\caption{Paired-circle view of Figure \ref{fig:secondlayer}: each row gives a candidate $aprime$ as a pair of circles, the left holding the return function value $R$ and the right holding the next period value function value $V$. The optimal choice is the row maximising $R+\beta V$.}
+\label{fig:splitcells}
+\end{figure}
+
+First, in Figure \ref{fig:vinf} consider the case in which $-\infty$ appears in the next period value function, say the upper $V_4$ (coloured black to show it is ruled out by being $-\infty$). Because $V_4$ is $-\infty$, we cannot meaningfully interpolate to obtain values for $V_{3.1},\dots,V_{3.5}$, and so we conservatively assume that they are all $-\infty$ as well (hence they are now all black). Other than filling in $-\infty$ for $V_{3.1},\dots,V_{3.5}$, this does not require any change to the algorithms we have seen so far.
+
+\begin{figure}[h]
+\centering
+\includegraphics{Graphs/FigureU.pdf}
+\caption{The case where the next period value function takes the value $-\infty$ at $V_4$. The values $V_{3.1},\dots,V_{3.5}$ would have to be obtained by interpolating between $V_3$ and $V_4$; since $V_4=-\infty$ we conservatively set them all to $-\infty$.}
+\label{fig:vinf}
+\end{figure}
+
+Second, in Figure \ref{fig:rinf} consider the case in which $-\infty$ appears in the return function, say the lower $R_2$ (coloured black to show it is ruled out by being $-\infty$). Unlike the previous case, we can still calculate all of $R_{2.1},\dots,R_{2.5}$, because these simply involve evaluating the (known) return function. This is the 'tricky' situation, in the sense that we have to decide what to do here, unlike the previous case where the conservative answer was essentially forced on us. We have come up with four possibilities.
+
+\begin{figure}[h]
+\centering
+\includegraphics{Graphs/FigureT.pdf}
+\caption{The case where the return function takes the value $-\infty$ at $R_2$. Unlike the value function case, the intermediate return function values $R_{2.1},\dots,R_{2.5}$ can still be evaluated exactly. But the question is what do do here?}
+\label{fig:rinf}
+\end{figure}
+
+The first possibility is simply to do the same as we did when the next period value function was $-\infty$, namely to deliberately contaminate all the intermediates ($R_{2.1},\dots,R_{2.5}$) with $-\infty$. This is very simple to implement, but it 'gives up' a lot of information, since we are not taking advantage of what we know about the return function.
+
+The second possibility (which is what the original implementation in VFI Toolkit did) is simply to pick the best interpolation point and then proceed as usual: we know all the intermediate $R$ values by evaluation and all the intermediate $V$ values by linear interpolation. This gives the most accurate value function. The drawback only becomes apparent when we combine this with simulating/iterating the model forward: the agent is placed on the two neighbouring coarse grid points with some mass on each, which is effectively saying that with positive probability the agent has chosen a policy that gives a return of $-\infty$ in order to be able to reach the neighbouring coarse grid point. This is precisely the problem of the 'limit of 97 dollars, but some end up on 100' that we saw at the beginning of this section. So while this option gives the most accurate value function, it comes at the cost of 'leaking' a small fraction of agents into 'impossible' behaviour.
+
+A third possibility is to still use the 'evaluate the return function on all intermediates and pick the optimum' approach of the second possibility, but to add a 'flag' that records the fact that one of the two neighbouring coarse grid points is 'impossible'. We then keep the maximum accuracy of the value function, but when iterating the agent distribution we use the flag to put zero mass on the 'impossible' coarse grid point and full mass on the other (so the flag overrules the standard linear interpolation back onto the coarse grid whenever one of the neighbouring coarse grid points represents an 'impossible' policy). This is excellent from an accuracy perspective: we get the best value function and we avoid leaking into impossible grid points. The weakness is a subtle inconsistency between the agent's expectations and what actually happens to them: when an intermediate grid point is chosen the agent's expectations put probability on both neighbouring coarse grid points, but the simulation sends the agent entirely to one of the two coarse neighbours, avoiding the impossible one.
+
+This leads to a fourth possibility. We let agents choose intermediate grid points, but in the cases where a $-\infty$ in the return function rules out a neighbouring coarse grid point, we construct the interpolated value function values using the same 'all mass on the remaining neighbour, zero on the impossible one' weights that we will use when iterating the agent distribution. This seemed clever at first, but in practice it collapses into the first possibility roughly half of the time. The return function is monotone decreasing in next period endogenous state in (effectively all) economic models, so if we make the next period value function a constant across the interpolation points (which is what putting weights of one and zero on the two neighbours achieves), then if the $-\infty$ is on the upper coarse neighbour we will simply pick the lower coarse neighbour as the optimum. If the $-\infty$ is on the lower coarse neighbour, the behaviour is slightly different: we choose the first interpolation point above the impossible coarse neighbour (or, more precisely, the lowest interpolation point whose return function value is not $-\infty$).
+
+So what to do? We have four options and no clear winner. Possibilities two and three give the most accurate value function, but possibility two 'leaks' into 'impossible' states during simulation/iteration of the agent distribution, so we consider it ruled out. Possibility three carries a small 'expectations' distortion, in that the value function and what actually happens to the agent differ subtly in terms of the probabilities placed on the 'impossible' coarse neighbour. Possibility four is, to our mind, better than possibility one: it is slightly more complicated to code but not in a way that would ever show up in runtime, and it provides marginally more accuracy. So we are down to a choice between three and four.
+
+Fundamentaly, what we are seeing here is that there is no easy way to deal with interpolation when you have a finite number on one side and a $-\infty$ on the other. Evaluating the return fn exactly at the intermediate points at first glance allows us to side-step this, but looking closely we see that actually this just shifts the problem into the simulation/interpolation where we linearly interpolate back onto the grid.
+
+
+\subsubsection*{Explanation of how this gets coded}
+There are two distinct sources of $-\infty$ that need to be handled when using the grid interpolation layer: the next period value function $EV_j(aprime,z)$ may take a value of $-\infty$ at one of the first layer grid points (for example because that state is unreachable or absorbing into an infeasible region), and the return function $F(aprime,a,z)$ may take a value of $-\infty$ at one of the first layer grid points (typically because $aprime$ violates a constraint at the current $(a,z)$, such as a borrowing constraint or a non-negativity constraint on consumption).
+
+These two cases are handled differently in the second layer. When $EV_j$ is $-\infty$ at a first layer grid point we must do something explicit, because the second layer uses linear interpolation of $EV_j$. The choice made is conservative: whenever one of the two first layer grid points either side of a second layer interval is $-\infty$, we treat the entire interval between them as $-\infty$ rather than interpolating against the $-\infty$ value (which would otherwise propagate $-\infty$ to every second layer point in the interval and prevent us from distinguishing between them). When $F$ is $-\infty$ at a first layer grid point we do not need any special handling, because the return function is evaluated exactly at every second layer point (rather than interpolated) and so a $-\infty$ at a first layer point places no restriction on the second layer points. We simply let the maximisation discard them. The resulting Policy is as accurate as possible, while remaining conservative with respect to states which should genuinely be $-\infty$.
+
+These two choices are each individually fine. However, they interact badly with the way the agent distribution is iterated. The standard treatment of the agent distribution under the grid interpolation layer is to keep the lower first layer grid point and convert the second layer index into a probability weight on the lower and upper first layer grid points (the 'n probs' setting described above). The problem is the following: suppose at some $(a,z)$ the optimal $aprime$ lies on a second layer point in the interval $(aprime_i,aprime_{i+1})$, and that $F(aprime_{i+1},a,z)=-\infty$ but $F$ is finite at the chosen second layer point and at $aprime_i$. The Policy is correct, in the sense that the chosen second layer point itself is feasible. But when iterating the agent distribution we then place a non-zero weight on the first layer grid point $aprime_{i+1}$, which is exactly the point at which $F=-\infty$. We are effectively saying that with positive probability the agent chose an $aprime$ at which the return function is $-\infty$. This causes agents to leak into states which are infeasible at the current $(a,z)$.
+
+One possible fix would be to rule out any second layer optimum whenever a neighbouring first layer grid point has $F=-\infty$, forcing the Policy back onto a first layer grid point in such cases. This eliminates the leakage, but at a substantial cost to the accuracy of the Policy: we lose the second layer entirely whenever we are close to a constraint, which is exactly the region where it matters most. Instead, we keep the second layer index in the Policy (so plots of Policy and statistics computed using $FnsToEvaluate$ retain the full accuracy of the grid interpolation layer), but we modify how the second layer index is translated into weights when iterating the agent distribution. Specifically, in the case where the upper first layer grid point has $F=-\infty$ we move the entire probability mass to the lower first layer grid point, and symmetrically for the lower first layer grid point.
+
+To implement this, when the grid interpolation layer is being used $Policy$ now carries an additional row containing a flag with three possible values. A flag value of $2$ indicates the usual case: convert the second layer index into weights on the lower and upper first layer grid points in the standard way. A flag value of $1$ indicates that all weight should be placed on the lower first layer grid point. A flag value of $3$ indicates that all weight should be placed on the upper first layer grid point. The flag is set during the value function iteration based on the values of $F$ at the neighbouring first layer grid points, and is then used whenever the policy is converted into transition weights on the first layer grid (so during agent distribution iteration, but not when evaluating functions on the agent distribution, where the fine grid value of $aprime$ is used directly).
+
+It is useful to think about this in terms of how the algorithm handles a constraint that tips from non-binding to binding between two first layer grid points. There is necessarily some 'fuzziness' on one side or the other of the true tipping point, because the agent distribution lives on the first layer grid. The original approach was to allow fuzziness by breaching the constraint as far as the next first layer grid point (placing some weight on the infeasible upper grid point). Simply ruling out the second layer optimum, as in the first alternative above, would amount to enforcing the constraint as far as the previous first layer grid point at \textit{both} the Policy and the agent distribution stages. The approach actually taken places no fuzziness in the Policy itself, and enforces the constraint as far as the previous first layer grid point only when iterating the agent distribution. As the first layer grid is refined all three approaches converge; the question is which behaves best when the first layer grid is genuinely coarse, and the chosen approach strikes a better balance in that regime.
+
+This change is largely invisible at the user level. The two exceptions are: any model in which the leakage was occurring will now give corrected results (so results may differ from those produced by earlier versions of the toolkit, and the new results are the correct ones); and any $Policy$ saved from an earlier version of the toolkit will no longer be compatible with the current commands, because it contains the wrong number of rows.
 
 \subsection*{Grid Interpolation Layer in Infinite Horizon VFI}
 How can we implement the grid interpolation layer in infinite horizon problems? Because of the iteration we want to try and pre-compute the 'second layer' so that it can just be reused each iteration. But as we iterate on the first layer the location of the policy will change, and so we will need to recompute the second layer, which will really hurt the runtimes. VFI Toolkit current implements two approaches that reflect compromises being made elsewhere to avoid having to recompute the second layer, these two are called 'pre-GI' and 'post-GI' (GI is short for grid interpolation layer).
