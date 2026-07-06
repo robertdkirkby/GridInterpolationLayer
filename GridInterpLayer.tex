@@ -179,6 +179,36 @@ The obvious approach is to apply this idea 'conditional on' any decision variabl
 
 Note that when there is a decision variable this does rather change how the 'first layer' is done, relative to pure discretization. In pure discretization we would find the optimal $(d*,aprime*)$, which is a single value for each of $d$ and $aprime$ (for each point in todays state-space). But now in the first layer we have to find the optimal $aprime$ for each possible $d$, so $aprime*(d)$, which is a single value of $aprime$ for each possible value of $d$, and the in the second layer we create a different second layer grid for each possible value of $d$. The second layer is more standard as now we just want the optimal $(d*,aprime*)$.
 
+Explicitly, the finite horizon problem with one endogenous state, one decision variable, and one markov shock is solved as follows. This is the same as the pseudocode above, but with the decision variable $d$ added.
+\begin{algorithmic}
+\State{Create the fine grid: $afine\_{}grid=interp1(1:1:n, a\_{}grid, linspace(1,n, n+(n-1)*n2))$.}
+\For{$j$ count backward from $N_j$ to $1$}
+   \State Get $\theta_j$ from $\Theta$
+   \For{All values $z$}
+    \State Calculate $EV_j(a',z)=E[V_{j+1}(a',z')]$ \Comment For $j=N_j$ this is zero
+    \State Interpolate $EV_j(a,z)$ from the first layer grid onto the
+    \State $\quad$ $\quad$ entire fine grid to get $\hat{EV}_j(a,z)$.
+     \For{All values of $(a,z)$}
+     \State \textbf{First Layer} (done conditional on each $d$)
+     \State For each $d$, solve for optimal $aprime$ on grid:
+     \State $\quad$ $\quad$ $g^1_{j}(d,a,z)=argmax_{i=1,...,n} F(d,a\_{}grid(i),a,z) + \beta EV_j(a\_{}grid(i),z)$
+     \State \textbf{Second Layer} (a different band for each $d$)
+     \State For each $d$, create the second layer grid around its midpoint:
+     \State $\quad$ $\quad$ $aL2\_{}ind(d)=(g^1_j(d,a,z)-2)*(n2+1)+(1:1:(3+2*n2))$
+     \State Jointly solve for optimal $(d,aprime)$ on the second layer:
+     \State $\quad$ $\quad$ $(d^*_j(a,z),g^2_j(a,z))=$
+     \State $\quad$ $\quad$ $\quad$ $argmax_{d,\;i=1,...,3+2*n2} F(d,afine\_{}grid(aL2\_{}ind(d,i)),a,z) + \beta \hat{EV}_j(aL2\_{}ind(d,i),z)$
+    \EndFor
+   \EndFor
+  \EndFor
+  \State Convert $(g^1_j(d^*_j(a,z),a,z),\, g^2_j(a,z))$ into $(lower\_{}index, second\_{}layer\_{}index)$:
+  \State $\quad$ $\quad$ if $g^2_j(a,z) \leq n2+1$: $lower\_{}index=g^1_j(d^*_j(a,z),a,z)-1$, $second\_{}layer\_{}index=g^2_j(a,z)$
+  \State $\quad$ $\quad$ else: $lower\_{}index=g^1_j(d^*_j(a,z),a,z)$, $second\_{}layer\_{}index=g^2_j(a,z)-(n2+1)$
+  \State Store the policy as $g_j(a,z)=[d^*_j(a,z),\;lower\_{}index,\;second\_{}layer\_{}index]$.
+  \\ \Return $[V_1,...,V_{N_j}]$, $[g_1,...,g_{N_j}]$
+\end{algorithmic}
+Relative to the no-decision-variable pseudocode, the only changes are that the first layer optimum $g^1_j$ is now found separately for each $d$, the second layer builds a separate band around the midpoint of each $d$, and the second layer argmax is taken jointly over $d$ and the second layer index to give the optimal $(d^*_j,g^2_j)$. The midpoint edge-handling (add/subtract one when $g^1_j$ is the first or last grid point) is exactly as for the no-$d$ case above. This is exactly how the Matlab code in \texttt{ValueFnIter\_{}FHorz\_{}GI1\_{}raw.m} is organized.
+
 \subsection*{Linear interpolation and evenly spaced points}
 Until now we have not specified how the interpolation should be done. In VFI Toolkit linear interpolation is used.
 
